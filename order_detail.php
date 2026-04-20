@@ -249,14 +249,14 @@ if (!$orderContext && is_array($bundle['order'] ?? null)) {
 }
 
 if (!$orderContext || !is_array($orderContext)) {
-    seller_order_detail_debug('order_detail_not_found_exit', [
+   seller_order_detail_debug('order_detail_forbidden_exit', [
         'checkpoint' => 'order_context_empty_after_helper_calls',
         'orderId' => $orderId,
         'sellerUserId' => $sellerUserId,
         'currentSellerId' => $currentSellerId,
     ]);
-    http_response_code(404);
-    echo 'Order not found.';
+    http_response_code(403);
+    echo 'Forbidden';
     exit;
 }
 
@@ -479,79 +479,7 @@ try {
     exit;
 }
 
-try {
-    $ownershipSql = 'SELECT 1 FROM order_items oi';
-    if ($listingsExists) {
-        $ownershipSql .= ' LEFT JOIN listings l ON l.id = oi.listing_id';
-    }
-    $ownershipSql .= ' WHERE oi.order_id = :order_id AND (';
 
-    $ownershipParts = [];
-
-     if ($columnExists($pdo, 'order_items', 'seller_user_id')) {
-        $ownershipParts[] = 'oi.seller_user_id = :seller_user_id';
-    }
-    if ($columnExists($pdo, 'order_items', 'owner_user_id')) {
-        $ownershipParts[] = 'oi.owner_user_id = :seller_user_id';
-    }
-    if ($columnExists($pdo, 'order_items', 'user_id')) {
-        $ownershipParts[] = 'oi.user_id = :seller_user_id';
-    }
-    if ($columnExists($pdo, 'order_items', 'seller_id')) {
-        $ownershipParts[] = 'oi.seller_id = :seller_user_id';
-        if ($currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
-            $ownershipParts[] = 'oi.seller_id = :current_seller_id';
-        }
-    }
-
-    if ($listingsExists && $columnExists($pdo, 'listings', 'seller_id')) {
-        $ownershipParts[] = 'l.seller_id = :seller_user_id';
-        if ($currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
-            $ownershipParts[] = 'l.seller_id = :current_seller_id';
-        }
-    }
-
-    if ($ownershipParts === []) {
-        $ownershipParts[] = '1 = 0';
-    }
-
-    $ownershipSql .= implode(' OR ', $ownershipParts) . ') LIMIT 1';
-    seller_order_detail_debug('ownership SQL built', [
-        'sql' => $ownershipSql,
-    ]);
-
-    $ownershipStmt = $pdo->prepare($ownershipSql);
-    $ownershipParams = [
-        ':order_id' => $orderId,
-        ':seller_user_id' => $sellerUserId,
-    ];
-    if (strpos($ownershipSql, ':current_seller_id') !== false) {
-        $ownershipParams[':current_seller_id'] = $currentSellerId;
-    }
-    seller_order_detail_debug('ownership SQL params used', [
-        'params' => $ownershipParams,
-    ]);
-    $ownershipStmt->execute($ownershipParams);
-
-    $ownershipMatched = (bool)$ownershipStmt->fetchColumn();
-    seller_order_detail_debug('ownership SQL matched or not', [
-        'matched' => $ownershipMatched,
-        'orderId' => $orderId,
-        'sellerUserId' => $sellerUserId,
-        'currentSellerId' => $currentSellerId,
-    ]);
-    if (!$ownershipMatched) {
-        seller_order_detail_debug('order_detail_forbidden_exit', [
-            'checkpoint' => 'ownership_sql_no_match',
-            'reason' => 'seller_not_owner_by_sql_gate',
-            'orderId' => $orderId,
-            'sellerUserId' => $sellerUserId,
-            'currentSellerId' => $currentSellerId,
-        ]);
-        http_response_code(403);
-        echo 'Forbidden';
-        exit;
-    }
 } catch (Throwable $e) {
     seller_order_detail_debug('order_detail_forbidden_exit', [
         'checkpoint' => 'ownership_sql_exception',
