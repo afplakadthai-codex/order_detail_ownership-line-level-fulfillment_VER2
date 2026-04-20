@@ -5,6 +5,45 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
     @session_start();
 }
 
+$sellerOrderDetailDebugLogger = static function (string $event, array $context = []): void {
+    $paths = [
+        dirname(__DIR__) . '/private_html/seller_order_detail_debug.log',
+        dirname(__DIR__) . '/seller_order_detail_debug.log',
+        __DIR__ . '/../seller_order_detail_debug.log',
+    ];
+
+    $line = '[' . gmdate('Y-m-d H:i:s') . " UTC] " . $event;
+    if ($context !== []) {
+        $json = json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (is_string($json) && $json !== '') {
+            $line .= ' ' . $json;
+        }
+    }
+    $line .= "\n";
+
+    foreach ($paths as $logPath) {
+        $dir = dirname($logPath);
+        if (!is_dir($dir)) {
+            continue;
+        }
+        if (is_file($logPath) || is_writable($dir)) {
+            @file_put_contents($logPath, $line, FILE_APPEND);
+            return;
+        }
+    }
+};
+
+if (!function_exists('seller_order_detail_debug')) {
+    function seller_order_detail_debug(string $event, array $context = []): void
+    {
+        $logger = $GLOBALS['sellerOrderDetailDebugLogger'] ?? null;
+        if (is_callable($logger)) {
+            $logger($event, $context);
+        }
+    }
+}
+$GLOBALS['sellerOrderDetailDebugLogger'] = $sellerOrderDetailDebugLogger;
+
 $guardCandidates = [
     __DIR__ . '/_guard.php',
     dirname(__DIR__) . '/member/_guard.php',
@@ -17,6 +56,10 @@ foreach ($guardCandidates as $guardFile) {
 
 $requiredHelper = __DIR__ . '/includes/order_request_actions.php';
 if (!is_file($requiredHelper)) {
+    seller_order_detail_debug('order_detail_blocked_internal_error', [
+        'checkpoint' => 'required_helper_missing',
+        'helper' => $requiredHelper,
+    ]);
     http_response_code(500);
     echo 'Order helper unavailable.';
     exit;
@@ -35,8 +78,11 @@ foreach ($optionalHelpers as $optionalFile) {
         require_once $optionalFile;
     }
 }
-
 if (!function_exists('seller_order_request_current_user_id')) {
+    seller_order_detail_debug('order_detail_forbidden_exit', [
+        'checkpoint' => 'seller_auth_unavailable',
+        'reason' => 'seller_order_request_current_user_id_missing',
+    ]);
     http_response_code(403);
     echo 'Seller authentication unavailable.';
     exit;
@@ -124,20 +170,41 @@ $resolveSellerUserId = static function (): int {
 
 $orderId = isset($_GET['id']) && is_numeric($_GET['id']) ? (int)$_GET['id'] : 0;
 
-$sellerUserId = $resolveSellerUserId();
-if ($sellerUserId <= 0 && function_exists('seller_order_request_current_user_id')) {
-    $sellerUserId = (int)seller_order_request_current_user_id();
-}
-
 $currentSellerId = 0;
 if (function_exists('seller_order_request_current_seller_id')) {
     $currentSellerId = (int)seller_order_request_current_seller_id();
 }
-if ($currentSellerId <= 0) {
+
+$sellerUserId = $resolveSellerUserId();
+if ($sellerUserId <= 0 && function_exists('seller_order_request_current_user_id')) {
+    $sellerUserId = (int)seller_order_request_current_user_id();
+}
+if ($currentSellerId <= 0 && $sellerUserId > 0) {
     $currentSellerId = $sellerUserId;
 }
 
+$sessionIdentities = [
+    'user.id' => $_SESSION['user']['id'] ?? null,
+    'auth_user.id' => $_SESSION['auth_user']['id'] ?? null,
+    'member.id' => $_SESSION['member']['id'] ?? null,
+    'seller.id' => $_SESSION['seller']['id'] ?? null,
+    'user_id' => $_SESSION['user_id'] ?? null,
+    'member_id' => $_SESSION['member_id'] ?? null,
+];
+seller_order_detail_debug('session identities discovered', [
+    'session_ids' => $sessionIdentities,
+    'resolvedSellerUserId' => $sellerUserId,
+    'resolvedCurrentSellerId' => $currentSellerId,
+    'orderId' => $orderId,
+]);
+
 if ($orderId <= 0 || $sellerUserId <= 0) {
+    seller_order_detail_debug('order_detail_not_found_exit', [
+        'checkpoint' => 'invalid_order_or_identity',
+        'orderId' => $orderId,
+        'sellerUserId' => $sellerUserId,
+        'currentSellerId' => $currentSellerId,
+    ]);
     http_response_code(404);
     echo 'Order not found.';
     exit;
@@ -164,37 +231,40 @@ $bundle = [
     'seller_can_reject_refund' => false,
 ];
 
-$debugLog = static function (int $orderId, int $sellerUserId, string $message): void {
-    $line = sprintf(
-        "[%s] order_id=%d seller_user_id=%d exception=%s\n",
-        gmdate('Y-m-d H:i:s') . ' UTC',
-        $orderId,
-        $sellerUserId,
-        $message
-    );
-    $logFiles = [
-        __DIR__ . '/seller_order_detail_debug.log',
-        dirname(__DIR__) . '/private_html/seller_order_detail_debug.log',
-        '/private_html/seller_order_detail_debug.log',
-    ];
-    foreach ($logFiles as $logFile) {
-        $dir = dirname($logFile);
-        if (!is_dir($dir)) {
-            continue;
-        }
-        if (is_file($logFile) || is_writable($dir)) {
-            @file_put_contents($logFile, $line, FILE_APPEND);
-            break;
-        }
-    }
-};
-
 try {
     if (function_exists('seller_order_request_get_order_context')) {
         $orderContext = seller_order_request_get_order_context($orderId, $sellerUserId);
+        seller_order_detail_debug('order_context_lookup', [
+            'sellerUserId' => $sellerUserId,
+            'result_empty' => !is_array($orderContext) || $orderContext === [],
+        ]);
+        if ((!is_array($orderContext) || $orderContext === []) && $currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
+            $fallbackOrderContext = seller_order_request_get_order_context($orderId, $currentSellerId);
+            seller_order_detail_debug('order_context_lookup_fallback_currentSellerId', [
+                'currentSellerId' => $currentSellerId,
+                'result_empty' => !is_array($fallbackOrderContext) || $fallbackOrderContext === [],
+            ]);
+            if (is_array($fallbackOrderContext) && $fallbackOrderContext !== []) {
+                $orderContext = $fallbackOrderContext;
+            }
+        }
     }
     if (function_exists('seller_order_request_get_request_bundle')) {
         $loaded = seller_order_request_get_request_bundle($orderId, $sellerUserId);
+        seller_order_detail_debug('request_bundle_lookup', [
+            'sellerUserId' => $sellerUserId,
+            'result_empty' => !is_array($loaded) || $loaded === [],
+        ]);
+        if ((!is_array($loaded) || $loaded === []) && $currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
+            $fallbackLoaded = seller_order_request_get_request_bundle($orderId, $currentSellerId);
+            seller_order_detail_debug('request_bundle_lookup_fallback_currentSellerId', [
+                'currentSellerId' => $currentSellerId,
+                'result_empty' => !is_array($fallbackLoaded) || $fallbackLoaded === [],
+            ]);
+            if (is_array($fallbackLoaded) && $fallbackLoaded !== []) {
+                $loaded = $fallbackLoaded;
+            }
+        }
         if (is_array($loaded)) {
             $bundle = array_merge($bundle, $loaded);
         }
@@ -205,9 +275,14 @@ try {
         if (function_exists('seller_order_request_get_refund_by_order_id')) {
             $bundle['refund'] = seller_order_request_get_refund_by_order_id($orderId, $sellerUserId);
         }
-    }
+     }
 } catch (Throwable $e) {
-    $debugLog($orderId, $sellerUserId, $e->getMessage());
+    seller_order_detail_debug('order_detail_exception', [
+        'message' => $e->getMessage(),
+        'orderId' => $orderId,
+        'sellerUserId' => $sellerUserId,
+        'currentSellerId' => $currentSellerId,
+    ]);
     // keep safe defaults
 }
 
@@ -216,6 +291,12 @@ if (!$orderContext && is_array($bundle['order'] ?? null)) {
 }
 
 if (!$orderContext || !is_array($orderContext)) {
+    seller_order_detail_debug('order_detail_not_found_exit', [
+        'checkpoint' => 'order_context_empty_after_helper_calls',
+        'orderId' => $orderId,
+        'sellerUserId' => $sellerUserId,
+        'currentSellerId' => $currentSellerId,
+    ]);
     http_response_code(404);
     echo 'Order not found.';
     exit;
@@ -406,6 +487,11 @@ $ordersExists = $tableExists($pdo, 'orders');
 $orderItemsExists = $tableExists($pdo, 'order_items');
 $listingsExists = $tableExists($pdo, 'listings');
 if (!$ordersExists || !$orderItemsExists) {
+    seller_order_detail_debug('order_detail_not_found_exit', [
+        'checkpoint' => 'orders_or_order_items_table_missing',
+        'ordersExists' => $ordersExists,
+        'orderItemsExists' => $orderItemsExists,
+    ]);
     http_response_code(404);
     echo 'Order not found.';
     exit;
@@ -413,14 +499,23 @@ if (!$ordersExists || !$orderItemsExists) {
 
 try {
     $orderExistsStmt = $pdo->prepare('SELECT id FROM orders WHERE id = :order_id LIMIT 1');
-    $orderExistsStmt->execute([':order_id' => $orderId]);
+ $orderExistsStmt->execute([':order_id' => $orderId]);
     $orderExists = (bool)$orderExistsStmt->fetchColumn();
     if (!$orderExists) {
+        seller_order_detail_debug('order_detail_not_found_exit', [
+            'checkpoint' => 'order_id_not_found',
+            'orderId' => $orderId,
+        ]);
         http_response_code(404);
         echo 'Order not found.';
         exit;
     }
 } catch (Throwable $e) {
+    seller_order_detail_debug('order_detail_not_found_exit', [
+        'checkpoint' => 'order_exists_query_failed',
+        'orderId' => $orderId,
+        'error' => $e->getMessage(),
+    ]);
     http_response_code(404);
     echo 'Order not found.';
     exit;
@@ -435,7 +530,7 @@ try {
 
     $ownershipParts = [];
 
-    if ($columnExists($pdo, 'order_items', 'seller_user_id')) {
+     if ($columnExists($pdo, 'order_items', 'seller_user_id')) {
         $ownershipParts[] = 'oi.seller_user_id = :seller_user_id';
     }
     if ($columnExists($pdo, 'order_items', 'owner_user_id')) {
@@ -444,32 +539,70 @@ try {
     if ($columnExists($pdo, 'order_items', 'user_id')) {
         $ownershipParts[] = 'oi.user_id = :seller_user_id';
     }
-if ($columnExists($pdo, 'order_items', 'seller_id')) {
-    $ownershipParts[] = 'oi.seller_id = :seller_user_id';
-}
+    if ($columnExists($pdo, 'order_items', 'seller_id')) {
+        $ownershipParts[] = 'oi.seller_id = :seller_user_id';
+        if ($currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
+            $ownershipParts[] = 'oi.seller_id = :current_seller_id';
+        }
+    }
 
-if ($listingsExists && $columnExists($pdo, 'listings', 'seller_id')) {
-    $ownershipParts[] = 'l.seller_id = :seller_user_id';
-}
+    if ($listingsExists && $columnExists($pdo, 'listings', 'seller_id')) {
+        $ownershipParts[] = 'l.seller_id = :seller_user_id';
+        if ($currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
+            $ownershipParts[] = 'l.seller_id = :current_seller_id';
+        }
+    }
 
     if ($ownershipParts === []) {
         $ownershipParts[] = '1 = 0';
     }
 
     $ownershipSql .= implode(' OR ', $ownershipParts) . ') LIMIT 1';
+    seller_order_detail_debug('ownership SQL built', [
+        'sql' => $ownershipSql,
+    ]);
 
     $ownershipStmt = $pdo->prepare($ownershipSql);
-$ownershipStmt->execute([
-    ':order_id' => $orderId,
-    ':seller_user_id' => $sellerUserId,
-]);
+    $ownershipParams = [
+        ':order_id' => $orderId,
+        ':seller_user_id' => $sellerUserId,
+    ];
+    if (strpos($ownershipSql, ':current_seller_id') !== false) {
+        $ownershipParams[':current_seller_id'] = $currentSellerId;
+    }
+    seller_order_detail_debug('ownership SQL params used', [
+        'params' => $ownershipParams,
+    ]);
+    $ownershipStmt->execute($ownershipParams);
 
-    if (!(bool)$ownershipStmt->fetchColumn()) {
+    $ownershipMatched = (bool)$ownershipStmt->fetchColumn();
+    seller_order_detail_debug('ownership SQL matched or not', [
+        'matched' => $ownershipMatched,
+        'orderId' => $orderId,
+        'sellerUserId' => $sellerUserId,
+        'currentSellerId' => $currentSellerId,
+    ]);
+    if (!$ownershipMatched) {
+        seller_order_detail_debug('order_detail_forbidden_exit', [
+            'checkpoint' => 'ownership_sql_no_match',
+            'reason' => 'seller_not_owner_by_sql_gate',
+            'orderId' => $orderId,
+            'sellerUserId' => $sellerUserId,
+            'currentSellerId' => $currentSellerId,
+        ]);
         http_response_code(403);
         echo 'Forbidden';
         exit;
     }
 } catch (Throwable $e) {
+    seller_order_detail_debug('order_detail_forbidden_exit', [
+        'checkpoint' => 'ownership_sql_exception',
+        'reason' => 'ownership_query_failed',
+        'orderId' => $orderId,
+        'sellerUserId' => $sellerUserId,
+        'currentSellerId' => $currentSellerId,
+        'error' => $e->getMessage(),
+    ]);
     http_response_code(403);
     echo 'Forbidden';
     exit;
