@@ -149,25 +149,6 @@ $columnExists = static function (PDO $pdo, string $tableName, string $columnName
     }
 };
 
-$resolveSellerUserId = static function (): int {
-    $candidates = [
-        $_SESSION['user']['id'] ?? null,
-        $_SESSION['auth_user']['id'] ?? null,
-        $_SESSION['member']['id'] ?? null,
-        $_SESSION['seller']['id'] ?? null,
-        $_SESSION['user_id'] ?? null,
-        $_SESSION['member_id'] ?? null,
-    ];
-
-    foreach ($candidates as $candidate) {
-        if (is_numeric($candidate) && (int)$candidate > 0) {
-            return (int)$candidate;
-        }
-    }
-
-    return 0;
-};
-
 $orderId = isset($_GET['id']) && is_numeric($_GET['id']) ? (int)$_GET['id'] : 0;
 
 $currentSellerId = 0;
@@ -175,13 +156,10 @@ if (function_exists('seller_order_request_current_seller_id')) {
     $currentSellerId = (int)seller_order_request_current_seller_id();
 }
 
-$sellerUserId = $resolveSellerUserId();
-if ($sellerUserId <= 0 && function_exists('seller_order_request_current_user_id')) {
-    $sellerUserId = (int)seller_order_request_current_user_id();
-}
-if ($currentSellerId <= 0 && $sellerUserId > 0) {
-    $currentSellerId = $sellerUserId;
-}
+$sellerUserId = (int)seller_order_request_current_user_id();
+seller_order_detail_debug('seller_order_request_current_user_id returned', [
+    'sellerUserId' => $sellerUserId,
+]);
 
 $sessionIdentities = [
     'user.id' => $_SESSION['user']['id'] ?? null,
@@ -238,16 +216,6 @@ try {
             'sellerUserId' => $sellerUserId,
             'result_empty' => !is_array($orderContext) || $orderContext === [],
         ]);
-        if ((!is_array($orderContext) || $orderContext === []) && $currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
-            $fallbackOrderContext = seller_order_request_get_order_context($orderId, $currentSellerId);
-            seller_order_detail_debug('order_context_lookup_fallback_currentSellerId', [
-                'currentSellerId' => $currentSellerId,
-                'result_empty' => !is_array($fallbackOrderContext) || $fallbackOrderContext === [],
-            ]);
-            if (is_array($fallbackOrderContext) && $fallbackOrderContext !== []) {
-                $orderContext = $fallbackOrderContext;
-            }
-        }
     }
     if (function_exists('seller_order_request_get_request_bundle')) {
         $loaded = seller_order_request_get_request_bundle($orderId, $sellerUserId);
@@ -255,16 +223,6 @@ try {
             'sellerUserId' => $sellerUserId,
             'result_empty' => !is_array($loaded) || $loaded === [],
         ]);
-        if ((!is_array($loaded) || $loaded === []) && $currentSellerId > 0 && $currentSellerId !== $sellerUserId) {
-            $fallbackLoaded = seller_order_request_get_request_bundle($orderId, $currentSellerId);
-            seller_order_detail_debug('request_bundle_lookup_fallback_currentSellerId', [
-                'currentSellerId' => $currentSellerId,
-                'result_empty' => !is_array($fallbackLoaded) || $fallbackLoaded === [],
-            ]);
-            if (is_array($fallbackLoaded) && $fallbackLoaded !== []) {
-                $loaded = $fallbackLoaded;
-            }
-        }
         if (is_array($loaded)) {
             $bundle = array_merge($bundle, $loaded);
         }
