@@ -149,6 +149,26 @@ $columnExists = static function (PDO $pdo, string $tableName, string $columnName
     }
 };
 
+
+$resolveSellerUserId = static function (): int {
+    $candidates = [
+        $_SESSION['user']['id'] ?? null,
+        $_SESSION['auth_user']['id'] ?? null,
+        $_SESSION['member']['id'] ?? null,
+        $_SESSION['seller']['id'] ?? null,
+        $_SESSION['user_id'] ?? null,
+        $_SESSION['member_id'] ?? null,
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (is_numeric($candidate) && (int)$candidate > 0) {
+            return (int)$candidate;
+        }
+    }
+
+    return 0;
+};
+
 $orderId = isset($_GET['id']) && is_numeric($_GET['id']) ? (int)$_GET['id'] : 0;
 
 $currentSellerId = 0;
@@ -156,9 +176,18 @@ if (function_exists('seller_order_request_current_seller_id')) {
     $currentSellerId = (int)seller_order_request_current_seller_id();
 }
 
-$sellerUserId = (int)seller_order_request_current_user_id();
+$helperSellerUserId = 0;
+if (function_exists('seller_order_request_current_user_id')) {
+    $helperSellerUserId = (int)seller_order_request_current_user_id();
+}
+
+$sellerUserId = $resolveSellerUserId();
+if ($sellerUserId <= 0) {
+    $sellerUserId = $helperSellerUserId;
+}
+
 seller_order_detail_debug('seller_order_request_current_user_id returned', [
-    'sellerUserId' => $sellerUserId,
+    'sellerUserId' => $helperSellerUserId,
 ]);
 
 $sessionIdentities = [
@@ -173,6 +202,7 @@ seller_order_detail_debug('session identities discovered', [
     'session_ids' => $sessionIdentities,
     'resolvedSellerUserId' => $sellerUserId,
     'resolvedCurrentSellerId' => $currentSellerId,
+    'helperSellerUserId' => $helperSellerUserId,
     'orderId' => $orderId,
 ]);
 
@@ -478,22 +508,6 @@ try {
     echo 'Order not found.';
     exit;
 }
-
-
-} catch (Throwable $e) {
-    seller_order_detail_debug('order_detail_forbidden_exit', [
-        'checkpoint' => 'ownership_sql_exception',
-        'reason' => 'ownership_query_failed',
-        'orderId' => $orderId,
-        'sellerUserId' => $sellerUserId,
-        'currentSellerId' => $currentSellerId,
-        'error' => $e->getMessage(),
-    ]);
-    http_response_code(403);
-    echo 'Forbidden';
-    exit;
-}
-
 
 $optionalSelectMap = [
     'fulfillment_status' => $columnExists($pdo, 'order_items', 'fulfillment_status') ? 'oi.fulfillment_status AS fulfillment_status' : "'pending' AS fulfillment_status",
